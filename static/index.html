@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RaftKV: a database that survives its servers failing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #eef1f6; --card: #ffffff; --ink: #131a2b; --muted: #5a6680; --line: #d3d9e5;
+    --leader: #b97a00; --leader-soft: #fdf1d0; --follower: #2f4a7c; --follower-soft: #e3eaf7;
+    --candidate: #6a3fc4; --candidate-soft: #ece5fa; --down: #8b93a5; --ok: #1b7a50; --bad: #b3372b;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 "IBM Plex Sans", system-ui, sans-serif; font-variant-numeric: tabular-nums; }
+  button, input { font: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--follower); outline-offset: 2px; }
+  .wrap { max-width: 1160px; margin: 0 auto; padding: 28px 22px 60px; }
+  header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { font-size: 27px; line-height: 1.15; margin: 0 0 8px; letter-spacing: -.01em; }
+  header p { margin: 0; color: var(--muted); max-width: 68ch; }
+  h2 { font-size: 16px; margin: 0 0 4px; }
+  .hint { color: var(--muted); font-size: 13.5px; margin: 0 0 12px; }
+  .btn { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 6px 11px; color: var(--ink); }
+  .btn:hover { border-color: var(--ink); }
+  .btn.solid { background: var(--ink); color: #fff; border-color: var(--ink); font-weight: 600; }
+  .btn[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+
+  .top { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px 18px; }
+  .stack { display: grid; gap: 16px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 16px; margin-top: 16px; align-items: start; }
+
+  /* ---- the ring ---- */
+  .stage { position: relative; height: 480px; }
+  .stage svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .node { position: absolute; width: 154px; transform: translate(-50%, -50%); background: var(--card); border: 1px solid var(--line); border-top: 5px solid var(--follower); border-radius: 8px; padding: 9px 10px 10px; }
+  .node .head { display: flex; justify-content: space-between; align-items: baseline; gap: 6px; }
+  .node .name { font-weight: 700; }
+  .node .term { color: var(--muted); font-size: 13px; }
+  .node .role { display: inline-block; font-weight: 600; font-size: 12.5px; padding: 0 8px; border-radius: 99px; background: var(--follower-soft); color: var(--follower); margin-top: 3px; }
+  .node .wait { height: 5px; background: var(--line); border-radius: 3px; margin: 8px 0; overflow: hidden; }
+  .node .wait i { display: block; height: 100%; width: 0; background: var(--follower); }
+  .node .ctl { display: flex; gap: 5px; }
+  .node .ctl .btn { font-size: 12.5px; padding: 3px 7px; flex: 1; white-space: nowrap; }
+  .node[data-role="leader"] { border-top-color: var(--leader); box-shadow: 0 0 0 3px var(--leader-soft); }
+  .node[data-role="leader"] .role { background: var(--leader-soft); color: var(--leader); }
+  .node[data-role="candidate"] { border-top-color: var(--candidate); }
+  .node[data-role="candidate"] .role { background: var(--candidate-soft); color: var(--candidate); }
+  .node[data-role="candidate"] .wait i { background: var(--candidate); }
+  .node[data-role="stopped"] { border-top-color: var(--down); background: #f4f5f8; color: var(--down); }
+  .node[data-role="stopped"] .role { background: #e4e7ee; color: var(--down); }
+  .node[data-cut="true"] { border-style: dashed; border-top-style: solid; }
+  .node[data-stale="true"] { box-shadow: none; }
+  #story { margin: 6px 0 0; font-weight: 500; min-height: 3em; }
+  .legend { display: flex; gap: 14px 18px; flex-wrap: wrap; color: var(--muted); font-size: 13px; margin-top: 10px; align-items: center; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+
+  .scenarios { display: grid; gap: 8px; }
+  .scenarios .btn { text-align: left; padding: 9px 12px; }
+  .scenarios .btn strong { display: block; }
+  .scenarios .btn span { color: var(--muted); font-size: 13.5px; }
+  .speed { display: flex; gap: 6px; align-items: center; margin-top: 12px; color: var(--muted); font-size: 13.5px; }
+  form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+  label { display: grid; gap: 3px; font-size: 13px; color: var(--muted); }
+  input { border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; width: 118px; color: var(--ink); background: #fff; }
+  #answer { margin: 10px 0 0; min-height: 1.5em; font-weight: 500; }
+  #answer.ok { color: var(--ok); } #answer.bad { color: var(--bad); }
+
+  .logs { overflow-x: auto; }
+  .logrow { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+  .logrow b { width: 58px; flex: none; font-size: 13.5px; }
+  .cells { display: flex; gap: 3px; }
+  .cell { width: 30px; height: 30px; flex: none; border-radius: 4px; display: grid; place-items: center; font-size: 12px; font-weight: 600; color: #fff; border: 2px solid transparent; }
+  .cell.pending { background: transparent !important; border-style: dashed; }
+  .cell.noop { opacity: .55; }
+  .legend .cell { width: 18px; height: 18px; display: inline-grid; vertical-align: middle; margin-right: 5px; }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 8px 6px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  th { border-top: 0; color: var(--muted); font-weight: 600; font-size: 13px; }
+  td.miss { color: var(--down); }
+  ul.events { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
+  ul.events li { padding: 6px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  ul.events li:first-child { border-top: 0; font-weight: 600; }
+  @media (max-width: 900px) { .top, .grid { grid-template-columns: 1fr; } }
+  /* too narrow for a ring: show the servers as a plain grid, without the travelling messages */
+  @media (max-width: 560px) { .stage { height: auto; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; } .stage svg { display: none; } .node { position: static; transform: none; width: auto; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>A database that survives its servers failing</h1>
+      <p>Five servers each keep a copy of the same data. They elect one leader, and a value is only saved once most of them have it. Stop any two and nothing is lost. This is the Raft consensus algorithm, running live below.</p>
+    </div>
+    <button class="btn" id="reset">Reset the demo</button>
+  </header>
+
+  <div class="top">
+    <div class="panel">
+      <div class="stage" id="stage"><svg id="wire" aria-hidden="true"></svg></div>
+      <p id="story" role="status"></p>
+      <div class="legend">
+        <span><span class="dot" style="background:#9aa7bd"></span>Heartbeat: "I am still the leader"</span>
+        <span><span class="dot" style="background:#1b7a50"></span>New entry being copied</span>
+        <span><span class="dot" style="border:2px solid #6a3fc4"></span>"Vote for me"</span>
+        <span><span class="dot" style="background:#6a3fc4"></span>Vote given</span>
+        <span>The bar on each server is its patience: when it runs out, that server calls an election.</span>
+      </div>
+    </div>
+
+    <div class="stack">
+      <div class="panel">
+        <h2>Try to break it</h2>
+        <p class="hint">Each button does one thing to the cluster. Watch the ring.</p>
+        <div class="scenarios">
+          <button class="btn" data-scene="stop"><strong>Stop the leader</strong><span>The others notice the silence and elect a new one.</span></button>
+          <button class="btn" data-scene="cut"><strong>Cut the leader off from the network</strong><span>It keeps running, but can no longer save anything.</span></button>
+          <button class="btn" data-scene="two"><strong>Stop two followers</strong><span>Three of five is still a majority, so saving keeps working.</span></button>
+          <button class="btn" data-scene="restore"><strong>Bring everything back</strong><span>Stopped and cut-off servers rejoin and catch up.</span></button>
+        </div>
+        <div class="speed">Speed
+          <button class="btn" data-speed="normal" aria-pressed="true">Normal</button>
+          <button class="btn" data-speed="slow" aria-pressed="false">Slow motion</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Use the database</h2>
+        <p class="hint">Requests go to the current leader, like a real client would.</p>
+        <form id="kv">
+          <label>Key<input id="key" value="city" maxlength="24" required></label>
+          <label>Value<input id="value" value="Delhi" maxlength="40"></label>
+          <button class="btn solid" data-op="put">Save</button>
+          <button class="btn" data-op="get">Read</button>
+          <button class="btn" data-op="delete">Delete</button>
+        </form>
+        <p id="answer" role="status"></p>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Each server's log</h2>
+      <p class="hint">Every change is a numbered entry. The leader copies its entries to the others; an entry counts once three of five servers hold it. Hover an entry to see what it is.</p>
+      <div class="logs" id="logs"></div>
+      <div class="legend">
+        <span><span class="cell" style="background:#2f4a7c"></span>Confirmed entry</span>
+        <span><span class="cell pending" style="border-color:#2f4a7c"></span>Not yet on a majority</span>
+        <span>A new colour means a new leader's term</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h2>What just happened</h2>
+      <ul class="events" id="events"></ul>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-top:16px">
+    <h2>What each server has stored</h2>
+    <p class="hint">A server that was stopped or cut off falls behind, then catches up when it returns.</p>
+    <div id="stores"></div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const TERM_COLOURS = ['#2f4a7c', '#1b7a50', '#b0562a', '#6a3fc4', '#0f7c8c', '#a23a6b', '#7a6a12', '#4a5568'];
+const ROLE = { leader: 'Leader', follower: 'Follower', candidate: 'Asking for votes', stopped: 'Stopped' };
+const MESSAGE = { heartbeat: ['#9aa7bd', 4, true], entries: ['#1b7a50', 6, true], vote_request: ['#6a3fc4', 5, false], vote: ['#6a3fc4', 5, true] };
+const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const cards = {}, centre = {};
+let last = null, seq = 0, flying = [];
+
+function buildCards(nodes) {
+  $('#stage').insertAdjacentHTML('beforeend', nodes.map(n => `<div class="node" id="node${n.id}">
+    <div class="head"><span class="name">Server ${n.id}</span><span class="term"></span></div><div class="role"></div>
+    <div class="wait" title="Patience left before this server calls an election"><i></i></div>
+    <div class="ctl"><button class="btn" data-act="toggle" data-id="${n.id}"></button><button class="btn" data-act="isolate" data-id="${n.id}"></button></div></div>`).join(''));
+  nodes.forEach(n => {
+    const el = $('#node' + n.id);
+    cards[n.id] = { el, role: el.querySelector('.role'), term: el.querySelector('.term'), bar: el.querySelector('.wait i'),
+                    toggle: el.querySelector('[data-act=toggle]'), isolate: el.querySelector('[data-act=isolate]') };
+  });
+  place();
+}
+
+function place() {
+  const stage = $('#stage'), w = stage.clientWidth, h = stage.clientHeight, ids = Object.keys(cards);
+  if (matchMedia('(max-width: 560px)').matches) { ids.forEach(id => { delete centre[id]; }); return; }
+  const cardW = cards[ids[0]]?.el.offsetWidth || 154;
+  const rx = Math.max(60, w / 2 - cardW / 2 - 4), ry = h / 2 - 62;
+  ids.forEach((id, k) => {
+    const a = -Math.PI / 2 + k * 2 * Math.PI / ids.length;
+    centre[id] = { x: w / 2 + rx * Math.cos(a), y: h / 2 + ry * Math.sin(a) };
+    cards[id].el.style.left = centre[id].x + 'px'; cards[id].el.style.top = centre[id].y + 'px';
+  });
+  $('#wire').setAttribute('viewBox', `0 0 ${w} ${h}`);
+}
+addEventListener('resize', place);
+
+function story(s) {
+  const up = s.nodes.filter(n => n.up), leader = s.nodes.find(n => n.id === s.leader);
+  const names = list => list.map(n => n.id).join(', ').replace(/, (\d+)$/, ' and $1');
+  const parts = [];
+  if (leader) {
+    const followers = up.filter(n => n.role === 'follower' && !n.cut);
+    parts.push(`Server ${leader.id} is the leader${followers.length ? `, followed by server${followers.length > 1 ? 's' : ''} ${names(followers)}` : ''}.`);
+    if (followers.length + 1 < 3) parts.push('It cannot reach a majority, so it cannot save anything.');
+  } else {
+    parts.push(up.length < 3 ? 'Fewer than three servers are running, so no leader can be elected and nothing can be saved.' : 'No leader right now. The first server to run out of patience will ask the others for their votes.');
+  }
+  const stopped = s.nodes.filter(n => !n.up), cut = up.filter(n => n.cut);
+  if (stopped.length) parts.push(`Server${stopped.length > 1 ? 's' : ''} ${names(stopped)} ${stopped.length > 1 ? 'are' : 'is'} stopped.`);
+  cut.forEach(n => parts.push(n.role === 'leader' && n.id !== s.leader
+    ? `Server ${n.id} is cut off and still believes it leads, but nobody hears it.`
+    : `Server ${n.id} is cut off, so it keeps calling elections nobody can answer.`));
+  return parts.join(' ');
+}
+
+function render(s) {
+  if (!Object.keys(cards).length) buildCards(s.nodes);
+  last = s;
+  const longest = Math.max(0, ...s.nodes.map(n => n.log.length)), from = Math.max(0, longest - 20);
+  s.nodes.forEach(n => {
+    const c = cards[n.id], stale = n.role === 'leader' && n.id !== s.leader;
+    c.el.dataset.role = n.role; c.el.dataset.cut = n.cut; c.el.dataset.stale = stale;
+    c.role.textContent = stale ? 'Old leader' : ROLE[n.role];
+    c.term.textContent = 'term ' + n.term;
+    c.bar.style.width = n.patience == null ? '0' : Math.round(n.patience * 100) + '%';
+    c.toggle.textContent = n.up ? 'Stop' : 'Start';
+    c.isolate.textContent = n.cut ? 'Reconnect' : 'Cut off';
+  });
+  $('#story').textContent = story(s);
+  document.querySelectorAll('[data-speed]').forEach(b => b.setAttribute('aria-pressed', b.dataset.speed === s.speed));
+
+  $('#logs').innerHTML = s.nodes.map(n => `<div class="logrow"><b>Server ${n.id}</b><div class="cells">${
+    n.log.slice(from).map((e, k) => {
+      const index = from + k + 1, colour = TERM_COLOURS[e.term % TERM_COLOURS.length];
+      const pending = !n.up || index > n.commit_index;
+      const what = e.op === 'noop' ? 'new leader marker' : e.op === 'put' ? `save ${e.key} = ${e.value}` : `${e.op} ${e.key}`;
+      return `<div class="cell ${pending ? 'pending' : ''} ${e.op === 'noop' ? 'noop' : ''}" style="background:${colour};border-color:${colour};${pending ? 'color:' + colour : ''}" title="Entry ${index}, term ${e.term}: ${esc(what)}">${index}</div>`;
+    }).join('') || '<span class="hint" style="margin:0">empty</span>'}</div></div>`).join('');
+
+  const keys = [...new Set(s.nodes.flatMap(n => Object.keys(n.store)))].sort();
+  $('#stores').innerHTML = keys.length ? `<table><thead><tr><th>Key</th>${s.nodes.map(n => `<th>Server ${n.id}</th>`).join('')}</tr></thead><tbody>${
+    keys.map(k => `<tr><td><strong>${esc(k)}</strong></td>${s.nodes.map(n => k in n.store ? `<td>${esc(n.store[k])}</td>` : `<td class="miss">${n.up ? 'not yet' : 'stopped'}</td>`).join('')}</tr>`).join('')
+  }</tbody></table>` : '<p class="hint" style="margin:0">Nothing saved yet. Save a value to see it copied to every server.</p>';
+  $('#events').innerHTML = s.events.map(e => `<li>${esc(e.text)}</li>`).join('');
+
+  // messages sent since the last poll become dots that travel for about one tick
+  const now = performance.now(), travel = Math.max(320, s.tick_ms * 1.1);
+  if (!still) s.messages.forEach((m, k) => flying.push({ ...m, start: now + (k % 6) * 12, travel }));
+  seq = s.seq;
+}
+
+function draw(now) {
+  flying = flying.filter(m => now - m.start < m.travel);
+  $('#wire').innerHTML = flying.map(m => {
+    const a = centre[m.from], b = centre[m.to]; if (!a || !b) return '';
+    let t = Math.max(0, (now - m.start) / m.travel), fade = 1;
+    if (!m.arrives) { fade = Math.max(0, 1 - t / 0.55); t = Math.min(t, 0.55); }   // lost on the way
+    const [colour, r, solid] = MESSAGE[m.kind];
+    return `<circle cx="${a.x + (b.x - a.x) * t}" cy="${a.y + (b.y - a.y) * t}" r="${r}" opacity="${fade}" fill="${solid ? colour : '#fff'}" stroke="${colour}" stroke-width="2"/>`;
+  }).join('');
+  requestAnimationFrame(draw);
+}
+
+async function poll() {
+  try { render(await (await fetch('/api/state?since=' + seq)).json()); } catch (e) {}
+  setTimeout(poll, 200);
+}
+const post = (path, body) => fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body ? JSON.stringify(body) : undefined }).then(r => r.json());
+
+const SCENES = {
+  stop: s => s.leader ? [`/api/nodes/${s.leader}/toggle`] : [],
+  cut: s => s.leader ? [`/api/nodes/${s.leader}/isolate`] : [],
+  two: s => s.nodes.filter(n => n.up && n.id !== s.leader).slice(0, 2).map(n => `/api/nodes/${n.id}/toggle`),
+  restore: () => ['/api/restore'],
+};
+document.addEventListener('click', e => {
+  const act = e.target.closest('[data-act]'), scene = e.target.closest('[data-scene]'), speed = e.target.closest('[data-speed]');
+  if (act) post(`/api/nodes/${act.dataset.id}/${act.dataset.act}`);
+  if (scene && last) {
+    const calls = SCENES[scene.dataset.scene](last);
+    if (!calls.length) { $('#answer').className = 'bad'; $('#answer').textContent = 'There is no leader at the moment. Wait a second and try again.'; }
+    calls.forEach(path => post(path));
+  }
+  if (speed) post('/api/speed/' + speed.dataset.speed);
+  if (e.target.id === 'reset') { post('/api/reset'); $('#answer').textContent = ''; seq = 0; }
+});
+$('#kv').addEventListener('submit', async e => {
+  e.preventDefault();
+  const op = e.submitter.dataset.op, out = $('#answer');
+  out.className = ''; out.textContent = 'Asking the leader…';
+  const r = await post('/api/command', { op, key: $('#key').value.trim(), value: $('#value').value });
+  out.className = r.ok ? 'ok' : 'bad';
+  out.textContent = r.message || (r.detail ? 'Enter a key first.' : '');
+});
+poll();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>

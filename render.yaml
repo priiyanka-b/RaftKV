@@ -1,0 +1,11 @@
+# Render blueprint for the visual demo: New > Blueprint, pick this repo. No database or keys needed.
+services:
+  - type: web
+    name: raftkv-demo
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn demo:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
